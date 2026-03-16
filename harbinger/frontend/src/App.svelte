@@ -2,8 +2,8 @@
   import { EventsOn } from '../wailsjs/runtime';
   import { SelectWordlist, StartScan, StopScan } from '../wailsjs/go/main/App';
 
-  // Genel Navigasyon
-  let activeTab = "scanner"; 
+  // --- GENEL NAVİGASYON ---
+  let activeTab = "scanner";
 
   // --- SCANNER STATE ---
   let targetUrl = "http://";
@@ -23,38 +23,66 @@
   let manualPayload = "";
   let intruderResults = [];
   let isAttacking = false;
-  function copyToRepeater(res) {
-    // Burp stili raw request oluşturuyoruz
-    repeaterRequest = `${res.Method || 'GET'} ${res.URL} HTTP/1.1\nHost: ${new URL(res.URL).hostname}\nUser-Agent: Harbinger/1.0\nAccept: */*\n\n${res.Body || ''}`;
-    activeTab = "repeater";
-  }
-  // Global Event Dinleyicileri
+
+  // --- EVENT DINLEYICILERI (TEK BIR MERKEZDEN) ---
+  
+  // Go tarafından gelen sonuçları yakalar
   EventsOn("found_result", (res) => {
-    if (activeTab === "scanner") results = [res, ...results];
-    if (activeTab === "intruder") intruderResults = [res, ...intruderResults];
+    if (activeTab === "scanner") {
+      // Svelte'in arayüzü güncellemesi için assignment gereklidir
+      results = [res, ...results]; 
+    }
+    if (activeTab === "intruder") {
+      intruderResults = [res, ...intruderResults];
+    }
   });
 
+  // Tarama veya saldırı bittiğinde butonları eski haline getirir
   EventsOn("scan_complete", (msg) => {
     isScanning = false;
     isAttacking = false;
     alert(msg);
   });
 
-  // Dosya Seçimi
+  // --- FONKSİYONLAR ---
+
   async function pickFile() {
     const path = await SelectWordlist();
     if (path) wordlistPath = path;
   }
 
-  // Scanner Kontrolü
   function handleStart() {
-    if (!wordlistPath || !targetUrl) { alert("Eksik alan!"); return; }
+    if (!wordlistPath || !targetUrl) { 
+      alert("Eksik alan!"); 
+      return; 
+    }
     results = [];
     isScanning = true;
     StartScan(targetUrl, threads, wordlistPath);
   }
 
-  // Repeater Kontrolü
+  // Durdurma butonunun Start'a dönmesini sağlar
+  async function handleStop() {
+    await StopScan();
+    isScanning = false; 
+  }
+
+  function copyToRepeater(res) {
+    let host = "";
+    try {
+      // URL formatını kontrol ederek hostname'i ayıklar
+      host = new URL(res.URL).hostname;
+    } catch {
+      host = "localhost";
+    }
+
+    // Repeater textarea içeriğini oluşturur
+    repeaterRequest = `${res.Method || 'GET'} ${res.URL} HTTP/1.1\nHost: ${host}\nUser-Agent: Harbinger/1.0\nAccept: */*\n\n${res.Body || ''}`;
+    
+    // Sekmeyi otomatik değiştirir
+    activeTab = "repeater";
+  }
+
   async function handleRepeaterSend() {
     isSending = true;
     repeaterResponse = "Waiting for response...";
@@ -68,23 +96,21 @@
     }
   }
 
-  // Repeater -> Intruder Aktarımı
   function sendToIntruder() {
     intruderRequest = repeaterRequest;
     activeTab = "intruder";
   }
 
-  // Intruder İşaretleme (Add §)
   function addPlaceholder() {
     const textarea = document.getElementById('intruder-area');
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
-    const text = intruderRequest;
-    if (start === end) return; // Seçili alan yoksa işlem yapma
-    intruderRequest = text.substring(0, start) + "§" + text.substring(start, end) + "§" + text.substring(end);
+    if (start === end) return;
+    
+    // Seçili metnin etrafına § işaretlerini koyar
+    intruderRequest = intruderRequest.substring(0, start) + "§" + intruderRequest.substring(start, end) + "§" + intruderRequest.substring(end);
   }
 
-  // Intruder Saldırısını Başlat
   async function handleIntruderAttack() {
     if (intruderPayloadType === "wordlist" && !wordlistPath) {
       alert("Lütfen bir wordlist seçin!");
@@ -92,7 +118,7 @@
     }
     intruderResults = [];
     isAttacking = true;
-    // Not: Go tarafında StartIntruder fonksiyonunu bir sonraki adımda yazacağız
+    // Go tarafındaki StartIntruder'ı tetikler
     await window.go.main.App.StartIntruder(intruderRequest, intruderPayloadType, manualPayload, wordlistPath, threads);
   }
 </script>
@@ -112,9 +138,9 @@
       <div class="header">
         <div class="controls">
           <input bind:value={targetUrl} placeholder="Target (http://...)" class="input-url" />
-          <button class="btn-secondary" on:click={pickFile}>📁 Wordlist</button>
+          <button class="btn-secondary" on:click={pickFile}>📁 {wordlistPath ? 'Wordlist OK' : 'Wordlist'}</button>
           <input type="number" bind:value={threads} class="input-threads" />
-          <button class={isScanning ? "btn-stop" : "btn-start"} on:click={isScanning ? StopScan : handleStart}>
+          <button class={isScanning ? "btn-stop" : "btn-start"} on:click={isScanning ? handleStop : handleStart}>
             {isScanning ? "STOP" : "START SCAN"}
           </button>
         </div>
@@ -183,7 +209,11 @@
         <div class="table-header"><span>Status</span><span>Payload</span><span>Length</span></div>
         <div class="table-body">
           {#each intruderResults as res}
-            <div class="row code-{res.StatusCode}"><span>{res.StatusCode}</span><span>{res.URL}</span><span>{res.ContentLen} B</span></div>
+            <div class="row code-{res.StatusCode}">
+                <span class="status">{res.StatusCode}</span>
+                <span class="url">{res.URL}</span>
+                <span class="len">{res.ContentLen} B</span>
+            </div>
           {/each}
         </div>
       </div>
@@ -205,16 +235,18 @@
   .panel-header { display: flex; justify-content: space-between; align-items: center; padding: 5px 10px; background: #21262d; }
   .panel-header h3 { font-size: 0.7rem; margin: 0; }
   textarea { flex-grow: 1; background: transparent; color: #3fb950; border: none; padding: 10px; resize: none; outline: none; }
-  .response-view { flex-grow: 1; padding: 10px; white-space: pre-wrap; overflow-y: auto; font-size: 0.8rem; }
+  .response-view { flex-grow: 1; padding: 10px; white-space: pre-wrap; overflow-y: auto; font-size: 0.8rem; color: #3fb950;}
   .results-container { flex-grow: 1; background: #161b22; border: 1px solid #30363d; margin-top: 10px; overflow: hidden; display: flex; flex-direction: column; }
   .table-header { display: flex; background: #21262d; padding: 5px; font-weight: bold; font-size: 0.8rem; }
   .table-body { overflow-y: auto; flex: 1; }
-  .row { display: flex; padding: 4px 10px; border-bottom: 1px solid #21262d; font-size: 0.8rem; }
-  .table-header span, .row span { flex: 1; overflow: hidden; }
-  .btn-start { background: #238636; color: white; padding: 5px 10px; border-radius: 4px; }
-  .btn-stop { background: #da3633; color: white; padding: 5px 10px; border-radius: 4px; }
-  .btn-secondary { background: #30363d; color: white; padding: 5px 10px; border-radius: 4px; }
-  input, select { background: #0d1117; border: 1px solid #30363d; color: white; padding: 5px; }
+  .row { display: flex; padding: 4px 10px; border-bottom: 1px solid #21262d; font-size: 0.8rem; cursor: pointer; }
+  .row:hover { background: #21262d; }
+  .table-header span, .row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn-start { background: #238636; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer; }
+  .btn-stop { background: #da3633; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer; }
+  .btn-secondary { background: #30363d; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer; }
+  input, select { background: #0d1117; border: 1px solid #30363d; color: white; padding: 5px; border-radius: 4px; }
   .code-200 { color: #3fb950; }
   .code-404 { color: #f85149; }
+  .code-500 { color: #d29922; }
 </style>

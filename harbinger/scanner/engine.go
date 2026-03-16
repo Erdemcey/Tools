@@ -1,15 +1,15 @@
 package scanner
 
 import (
-	"bufio" // Satır satır okuma için
+	"bufio"
 	"context"
 	"fmt"
-	"os" // Dosya işlemleri için
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
 
-// BU KISMI EKLE VEYA VARSA KONTROL ET
 type Result struct {
 	URL        string
 	StatusCode int
@@ -18,10 +18,9 @@ type Result struct {
 
 type Engine struct {
 	Threads      int
-	WordlistPath string // Artık liste değil, dosya yolu tutuyoruz
+	WordlistPath string
 	BaseURL      string
 	Results      chan Result
-	WorkerPool   chan struct{}
 }
 
 func NewEngine(baseURL string, threads int, path string) *Engine {
@@ -29,55 +28,65 @@ func NewEngine(baseURL string, threads int, path string) *Engine {
 		BaseURL:      baseURL,
 		Threads:      threads,
 		WordlistPath: path,
-		Results:      make(chan Result),
-		WorkerPool:   make(chan struct{}, threads),
+		Results:      make(chan Result, 1000), // Buffer'ı yüksek tutmak tıkanmayı önler
 	}
 }
 
 func (e *Engine) Run(ctx context.Context) {
-	var wg sync.WaitGroup
-	reqClient := NewRequester(10 * time.Second)
+	defer close(e.Results)
 
-	// Dosyayı aç
 	file, err := os.Open(e.WordlistPath)
 	if err != nil {
-		return // Hata durumunda çık
+		return
 	}
 	defer file.Close()
 
+	words := make(chan string, e.Threads*10)
+	var wg sync.WaitGroup
+	reqClient := NewRequester(10*time.Second, e.Threads)
+
+	// Worker Pool başlatılıyor
+	for i := 0; i < e.Threads; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for word := range words {
+				select {
+				case <-ctx.Done(): // Stop'a basıldıysa hemen çık
+					return
+				default:
+					targetURL := fmt.Sprintf("%s/%s", strings.TrimRight(e.BaseURL, "/"), word)
+
+					status, size, err := reqClient.DoRequest(targetURL)
+
+					if err == nil && status != 404 {
+						select {
+						case e.Results <- Result{
+							URL:        targetURL,
+							StatusCode: status,
+							ContentLen: size,
+						}:
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
+			}
+		}()
+	}
+
+	// Dosyayı oku ve kanala gönder
 	scanner := bufio.NewScanner(file)
-
-	// Dosyadaki her satırı (kelimeyi) oku
+	scanner.Buffer(make([]byte, 1024), 1024*1024)
 	for scanner.Scan() {
-		word := scanner.Text()
-
 		select {
 		case <-ctx.Done():
-			return
-		case e.WorkerPool <- struct{}{}:
-			wg.Add(1)
-			targetURL := fmt.Sprintf("%s/%s", e.BaseURL, word)
-
-			go func(url string) {
-				defer wg.Done()
-				defer func() { <-e.WorkerPool }()
-
-				status, size, err := reqClient.DoRequest(url)
-				if err != nil {
-					return
-				}
-
-				e.Results <- Result{
-					URL:        url,
-					StatusCode: status,
-					ContentLen: size,
-				}
-			}(targetURL)
+			goto StopProcessing
+		case words <- scanner.Text():
 		}
 	}
 
-	go func() {
-		wg.Wait()
-		close(e.Results)
-	}()
+StopProcessing:
+	close(words) // Worker'lara iş bitti sinyali gönder
+	wg.Wait()    // Tüm worker'ların güvenli kapandığından emin ol
 }

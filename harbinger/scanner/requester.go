@@ -2,29 +2,25 @@ package scanner
 
 import (
 	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"time"
 )
 
-// Requester, özelleştirilmiş HTTP istemcisini tutar
 type Requester struct {
 	Client *http.Client
 }
 
-// NewRequester, yüksek performans ayarlı bir istemci döner
-func NewRequester(timeout time.Duration) *Requester {
-	// Buradaki Transport ayarları hızın anahtarıdır
+func NewRequester(timeout time.Duration, threads int) *Requester {
 	transport := &http.Transport{
-		// SSL sertifika hatalarını görmezden gel (Tarama araçları için kritik)
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-
-		// Bağlantı havuzu ayarları
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 100,
+		// Bağlantı havuzu ayarları: ffuf benzeri hız için threads sayısına göre dinamik yapıyoruz
+		MaxIdleConns:        0,           // Sınırsız toplam boşta bağlantı
+		MaxIdleConnsPerHost: threads + 5, // Host başına boşta bekleyen bağlantı sayısı
 		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   false, // Bağlantıları açık tutmak hız kazandırır
 
-		// TCP seviyesinde optimizasyonlar
 		DialContext: (&net.Dialer{
 			Timeout:   timeout,
 			KeepAlive: 30 * time.Second,
@@ -35,32 +31,29 @@ func NewRequester(timeout time.Duration) *Requester {
 		Client: &http.Client{
 			Transport: transport,
 			Timeout:   timeout,
-			// Otomatik yönlendirmeleri (Redirect) kapatmak genellikle daha iyidir
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
+				return http.ErrUseLastResponse // Yönlendirmeleri takip etme
 			},
 		},
 	}
 }
 
-// DoRequest, verilen URL'ye istek atar ve sonucu döner
 func (r *Requester) DoRequest(url string) (int, int64, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	// WAF engellerine takılmamak için standart bir User-Agent ekleyelim
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) HarbingerScanner/1.0")
 
 	resp, err := r.Client.Do(req)
 	if err != nil {
 		return 0, 0, err
 	}
+
+	// KRİTİK: Body'yi tamamen okumadan kapatırsan bağlantı reuse edilemez (Hız düşer)
 	defer resp.Body.Close()
+	n, _ := io.Copy(io.Discard, resp.Body)
 
-	// Content-Length (Boyut) bilgisini al
-	size := resp.ContentLength
-
-	return resp.StatusCode, size, nil
+	return resp.StatusCode, n, nil
 }

@@ -4,101 +4,135 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"harbinger/scanner" // Modül adın farklıysa burayı güncelle
+	"harbinger/scanner" // go.mod dosmandaki module ismiyle aynı olmalı
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// App struct
 type App struct {
 	ctx            context.Context
-	cancel         context.CancelFunc // Scanner için
-	intruderCancel context.CancelFunc // Intruder için
+	cancel         context.CancelFunc
+	intruderCancel context.CancelFunc
 }
 
-// NewApp creates a new App application struct
-func NewApp() *App {
-	return &App{}
-}
+func NewApp() *App { return &App{} }
 
-// startup is called when the app starts.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+}
+
+// --- GENEL ARAÇLAR (Hatanın Çözümü Burada) ---
+
+// SelectWordlist arayüzden dosya seçmeni sağlar
+func (a *App) SelectWordlist() string {
+	selection, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Wordlist Seç",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Text Files (*.txt)", Pattern: "*.txt"},
+		},
+	})
+	if err != nil {
+		return ""
+	}
+	return selection
 }
 
 // --- SCANNER MODÜLÜ ---
 
 func (a *App) StartScan(targetURL string, threads int, wordlistPath string) {
-	if a.cancel != nil {
-		a.cancel()
+	a.StopScan()
+
+	// URL'in başına http eklemeyi unutma
+	if !strings.HasPrefix(targetURL, "http") {
+		targetURL = "http://" + targetURL
 	}
 
-	ctx, cancel := context.WithCancel(a.ctx)
+	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 
 	engine := scanner.NewEngine(targetURL, threads, wordlistPath)
 
+	// Motoru başlat
+	go engine.Run(ctx)
+
+	// Sonuçları dinleyen ayrı bir döngü
 	go func() {
-		engine.Run(ctx)
-		for res := range engine.Results {
-			runtime.EventsEmit(a.ctx, "found_result", res)
+		for {
+			select {
+			case res, ok := <-engine.Results:
+				if !ok {
+					runtime.EventsEmit(a.ctx, "scan_complete", "Bitti")
+					return
+				}
+				// VERİ BURADA FIRLATILIYOR
+				runtime.EventsEmit(a.ctx, "found_result", res)
+			case <-ctx.Done():
+				// Stop'a basılsa bile kanalda kalan son verileri oku
+				// Bu kısım "eskiden durdurunca geliyordu" dediğin sorunu çözer
+				for remaining := range engine.Results {
+					runtime.EventsEmit(a.ctx, "found_result", remaining)
+				}
+				return
+			}
 		}
-		runtime.EventsEmit(a.ctx, "scan_complete", "Tarama tamamlandı.")
 	}()
 }
 
+// StopScan: Çalışan taramayı anında durdurur
 func (a *App) StopScan() {
 	if a.cancel != nil {
-		a.cancel()
+		a.cancel() // Context'i iptal et, bu tüm worker'lara dur sinyali gönderir
+		a.cancel = nil
+		runtime.EventsEmit(a.ctx, "scan_complete", "Tarama kullanıcı tarafından durduruldu.")
 	}
 }
 
 // --- REPEATER MODÜLÜ ---
 
 func (a *App) SendRepeater(rawRequest string) string {
-	reader := bufio.NewReader(strings.NewReader(rawRequest))
+	// Satır sonlarını düzelt
+	rawRequest = strings.ReplaceAll(rawRequest, "\r\n", "\n")
+	parts := strings.SplitN(rawRequest, "\n\n", 2)
+	headerLines := strings.Split(parts[0], "\n")
 
-	// İlk satır: METHOD URL PROTOCOL
-	firstLine, err := reader.ReadString('\n')
-	if err != nil {
-		return "Hata: İstek okunamadı."
+	if len(headerLines) < 1 {
+		return "Hata: Geçersiz İstek"
+	}
+	firstLine := strings.Fields(headerLines[0])
+	if len(firstLine) < 2 {
+		return "Hata: Method veya URL eksik"
 	}
 
-	parts := strings.Fields(firstLine)
-	if len(parts) < 2 {
-		return "Geçersiz Format: METHOD URL eksik."
+	method := strings.ToUpper(firstLine[0])
+	targetURL := firstLine[1]
+
+	var bodyReader io.Reader
+	if len(parts) > 1 {
+		bodyReader = strings.NewReader(parts[1])
 	}
 
-	method := parts[0]
-	targetURL := parts[1]
-
-	req, err := http.NewRequest(method, targetURL, nil)
+	req, err := http.NewRequest(method, targetURL, bodyReader)
 	if err != nil {
 		return fmt.Sprintf("Hata: %s", err)
 	}
 
-	// Headerları işle
-	for {
-		line, _ := reader.ReadString('\n')
-		line = strings.TrimSpace(line)
-		if line == "" {
-			break
-		}
+	for _, line := range headerLines[1:] {
 		h := strings.SplitN(line, ":", 2)
 		if len(h) == 2 {
 			req.Header.Set(strings.TrimSpace(h[0]), strings.TrimSpace(h[1]))
 		}
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Sprintf("Hata: %s", err)
+		return fmt.Sprintf("Bağlantı Hatası: %s", err)
 	}
 	defer resp.Body.Close()
 
@@ -109,31 +143,29 @@ func (a *App) SendRepeater(rawRequest string) string {
 // --- INTRUDER MODÜLÜ ---
 
 func (a *App) StartIntruder(rawRequest string, payloadType string, manualPayload string, wordlistPath string, threads int) {
-	// Eğer çalışan bir saldırı varsa iptal et
 	if a.intruderCancel != nil {
 		a.intruderCancel()
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	a.intruderCancel = cancel
 
 	var payloads []string
 	if payloadType == "manual" {
-		payloads = append(payloads, manualPayload)
+		payloads = strings.Split(manualPayload, "\n")
 	} else {
 		file, err := os.Open(wordlistPath)
 		if err != nil {
-			runtime.EventsEmit(a.ctx, "scan_complete", "Hata: Wordlist açılamadı.")
+			runtime.EventsEmit(a.ctx, "scan_complete", "Hata: Wordlist dosyası bulunamadı.")
 			return
 		}
-		scannerFile := bufio.NewScanner(file)
-		for scannerFile.Scan() {
-			payloads = append(payloads, scannerFile.Text())
+		s := bufio.NewScanner(file)
+		for s.Scan() {
+			payloads = append(payloads, s.Text())
 		}
 		file.Close()
 	}
 
-	jobs := make(chan string, len(payloads))
+	jobs := make(chan string, threads)
 	var wg sync.WaitGroup
 
 	for i := 0; i < threads; i++ {
@@ -146,78 +178,59 @@ func (a *App) StartIntruder(rawRequest string, payloadType string, manualPayload
 					return
 				default:
 					finalReqStr := strings.ReplaceAll(rawRequest, "§", p)
-					a.executeRawRequest(finalReqStr, p)
+					a.executeRawRequest(ctx, finalReqStr, p)
 				}
 			}
 		}()
 	}
 
-	for _, p := range payloads {
-		jobs <- p
-	}
-	close(jobs)
-	wg.Wait()
-	runtime.EventsEmit(a.ctx, "scan_complete", "Saldırı Tamamlandı!")
+	go func() {
+		for _, p := range payloads {
+			if strings.TrimSpace(p) == "" {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				break
+			case jobs <- p:
+			}
+		}
+		close(jobs)
+		wg.Wait()
+		runtime.EventsEmit(a.ctx, "scan_complete", "Saldırı Tamamlandı!")
+	}()
 }
 
-// executeRawRequest: Intruder için ham isteği işleyip sonuç döner
-func (a *App) executeRawRequest(rawStr string, currentPayload string) {
-	// Satır sonlarını standardize et (Burp'ten gelen \r\n sorununu çözer)
+func (a *App) executeRawRequest(ctx context.Context, rawStr string, currentPayload string) {
 	rawStr = strings.ReplaceAll(rawStr, "\r\n", "\n")
-
-	// Body ve Header ayrımı
 	parts := strings.SplitN(rawStr, "\n\n", 2)
-	headerPart := parts[0]
-	bodyPart := ""
-	if len(parts) > 1 {
-		bodyPart = parts[1]
-	}
+	headerLines := strings.Split(parts[0], "\n")
 
-	// İlk satırı oku
-	reader := bufio.NewReader(strings.NewReader(headerPart))
-	firstLine, err := reader.ReadString('\n')
-	if err != nil {
+	if len(headerLines) < 1 {
+		return
+	}
+	firstLine := strings.Fields(headerLines[0])
+	if len(firstLine) < 2 {
 		return
 	}
 
-	fParts := strings.Fields(firstLine)
-	if len(fParts) < 2 {
-		return
-	}
+	method := strings.ToUpper(firstLine[0])
+	targetURL := firstLine[1]
 
-	// Değişkenleri açıkça tanımlayalım
-	method := strings.ToUpper(fParts[0])
-	targetURL := fParts[1]
-
-	// Body'yi hazırla
 	var bodyReader io.Reader
-	if bodyPart != "" {
-		bodyReader = strings.NewReader(bodyPart)
-	} else {
-		bodyReader = nil // Body yoksa nil olmalı
+	if len(parts) > 1 {
+		bodyReader = strings.NewReader(parts[1])
 	}
 
-	// İsteği oluştur
-	req, err := http.NewRequest(method, targetURL, bodyReader)
-	if err != nil {
-		fmt.Println("Request Error:", err)
-		return
-	}
-
-	// Headerları ekle (döngü devam ediyor...)
-	for {
-		line, _ := reader.ReadString('\n')
-		line = strings.TrimSpace(line)
-		if line == "" {
-			break
-		}
+	req, _ := http.NewRequestWithContext(ctx, method, targetURL, bodyReader)
+	for _, line := range headerLines[1:] {
 		h := strings.SplitN(line, ":", 2)
 		if len(h) == 2 {
 			req.Header.Set(strings.TrimSpace(h[0]), strings.TrimSpace(h[1]))
 		}
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return
@@ -232,19 +245,4 @@ func (a *App) executeRawRequest(rawStr string, currentPayload string) {
 		"ContentLen": len(body),
 		"Method":     method,
 	})
-}
-
-// --- GENEL ARAÇLAR ---
-
-func (a *App) SelectWordlist() string {
-	selection, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "Wordlist Seç",
-		Filters: []runtime.FileFilter{
-			{DisplayName: "Text Files (*.txt)", Pattern: "*.txt"},
-		},
-	})
-	if err != nil {
-		return ""
-	}
-	return selection
 }
