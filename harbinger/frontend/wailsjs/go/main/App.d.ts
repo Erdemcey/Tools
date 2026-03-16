@@ -9,4 +9,6 @@ export function StartIntruder(arg1:string,arg2:string,arg3:string,arg4:string,ar
 
 export function StartScan(arg1:string,arg2:number,arg3:string):Promise<void>;
 
+export function StopIntruder():Promise<void>;
+
 export function StopScan():Promise<void>;

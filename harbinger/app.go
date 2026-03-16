@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"harbinger/scanner" // go.mod dosmandaki module ismiyle aynı olmalı
+	"harbinger/scanner"
 	"io"
 	"net/http"
 	"os"
@@ -27,12 +27,11 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
-// --- GENEL ARAÇLAR (Hatanın Çözümü Burada) ---
+// --- GENEL ARAÇLAR ---
 
-// SelectWordlist arayüzden dosya seçmeni sağlar
 func (a *App) SelectWordlist() string {
 	selection, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "Wordlist Seç",
+		Title: "Wordlist Sec",
 		Filters: []runtime.FileFilter{
 			{DisplayName: "Text Files (*.txt)", Pattern: "*.txt"},
 		},
@@ -47,62 +46,54 @@ func (a *App) SelectWordlist() string {
 
 func (a *App) StartScan(targetURL string, threads int, wordlistPath string) {
 	a.StopScan()
-
-	// URL'in başına http eklemeyi unutma
 	if !strings.HasPrefix(targetURL, "http") {
 		targetURL = "http://" + targetURL
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 
 	engine := scanner.NewEngine(targetURL, threads, wordlistPath)
-
-	// Motoru başlat
 	go engine.Run(ctx)
 
-	// Sonuçları dinleyen ayrı bir döngü
 	go func() {
 		for {
 			select {
 			case res, ok := <-engine.Results:
 				if !ok {
-					runtime.EventsEmit(a.ctx, "scan_complete", "Bitti")
+					runtime.EventsEmit(a.ctx, "scan_complete", "Tarama Bitti")
 					return
 				}
-				// VERİ BURADA FIRLATILIYOR
-				runtime.EventsEmit(a.ctx, "found_result", res)
+				runtime.EventsEmit(a.ctx, "found_result", map[string]interface{}{
+					"Source":     "scanner",
+					"StatusCode": res.StatusCode,
+					"URL":        res.URL,
+					"ContentLen": res.ContentLen,
+					"Method":     res.Method,
+					"Body":       res.Body,
+				})
 			case <-ctx.Done():
-				// Stop'a basılsa bile kanalda kalan son verileri oku
-				// Bu kısım "eskiden durdurunca geliyordu" dediğin sorunu çözer
-				for remaining := range engine.Results {
-					runtime.EventsEmit(a.ctx, "found_result", remaining)
-				}
 				return
 			}
 		}
 	}()
 }
 
-// StopScan: Çalışan taramayı anında durdurur
 func (a *App) StopScan() {
 	if a.cancel != nil {
-		a.cancel() // Context'i iptal et, bu tüm worker'lara dur sinyali gönderir
+		a.cancel()
 		a.cancel = nil
-		runtime.EventsEmit(a.ctx, "scan_complete", "Tarama kullanıcı tarafından durduruldu.")
+		runtime.EventsEmit(a.ctx, "scan_complete", "Tarama durduruldu.")
 	}
 }
 
 // --- REPEATER MODÜLÜ ---
 
 func (a *App) SendRepeater(rawRequest string) string {
-	// Satır sonlarını düzelt
 	rawRequest = strings.ReplaceAll(rawRequest, "\r\n", "\n")
 	parts := strings.SplitN(rawRequest, "\n\n", 2)
 	headerLines := strings.Split(parts[0], "\n")
-
 	if len(headerLines) < 1 {
-		return "Hata: Geçersiz İstek"
+		return "Hata: Gecersiz Istek"
 	}
 	firstLine := strings.Fields(headerLines[0])
 	if len(firstLine) < 2 {
@@ -111,31 +102,26 @@ func (a *App) SendRepeater(rawRequest string) string {
 
 	method := strings.ToUpper(firstLine[0])
 	targetURL := firstLine[1]
-
 	var bodyReader io.Reader
 	if len(parts) > 1 {
 		bodyReader = strings.NewReader(parts[1])
 	}
-
 	req, err := http.NewRequest(method, targetURL, bodyReader)
 	if err != nil {
 		return fmt.Sprintf("Hata: %s", err)
 	}
-
 	for _, line := range headerLines[1:] {
 		h := strings.SplitN(line, ":", 2)
 		if len(h) == 2 {
 			req.Header.Set(strings.TrimSpace(h[0]), strings.TrimSpace(h[1]))
 		}
 	}
-
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Sprintf("Bağlantı Hatası: %s", err)
+		return fmt.Sprintf("Baglanti Hatasi: %s", err)
 	}
 	defer resp.Body.Close()
-
 	body, _ := io.ReadAll(resp.Body)
 	return fmt.Sprintf("%s %s\n\n%s", resp.Proto, resp.Status, string(body))
 }
@@ -155,7 +141,7 @@ func (a *App) StartIntruder(rawRequest string, payloadType string, manualPayload
 	} else {
 		file, err := os.Open(wordlistPath)
 		if err != nil {
-			runtime.EventsEmit(a.ctx, "scan_complete", "Hata: Wordlist dosyası bulunamadı.")
+			runtime.EventsEmit(a.ctx, "scan_complete", "Hata: Dosya bulunamadi.")
 			return
 		}
 		s := bufio.NewScanner(file)
@@ -172,11 +158,14 @@ func (a *App) StartIntruder(rawRequest string, payloadType string, manualPayload
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for p := range jobs {
+			for {
 				select {
 				case <-ctx.Done():
 					return
-				default:
+				case p, ok := <-jobs:
+					if !ok {
+						return
+					}
 					finalReqStr := strings.ReplaceAll(rawRequest, "§", p)
 					a.executeRawRequest(ctx, finalReqStr, p)
 				}
@@ -191,21 +180,28 @@ func (a *App) StartIntruder(rawRequest string, payloadType string, manualPayload
 			}
 			select {
 			case <-ctx.Done():
-				break
+				goto Finalize
 			case jobs <- p:
 			}
 		}
+	Finalize:
 		close(jobs)
 		wg.Wait()
-		runtime.EventsEmit(a.ctx, "scan_complete", "Saldırı Tamamlandı!")
+		runtime.EventsEmit(a.ctx, "scan_complete", "Saldırı bitti veya durduruldu.")
 	}()
+}
+
+func (a *App) StopIntruder() {
+	if a.intruderCancel != nil {
+		a.intruderCancel()
+		a.intruderCancel = nil
+	}
 }
 
 func (a *App) executeRawRequest(ctx context.Context, rawStr string, currentPayload string) {
 	rawStr = strings.ReplaceAll(rawStr, "\r\n", "\n")
 	parts := strings.SplitN(rawStr, "\n\n", 2)
 	headerLines := strings.Split(parts[0], "\n")
-
 	if len(headerLines) < 1 {
 		return
 	}
@@ -213,15 +209,12 @@ func (a *App) executeRawRequest(ctx context.Context, rawStr string, currentPaylo
 	if len(firstLine) < 2 {
 		return
 	}
-
 	method := strings.ToUpper(firstLine[0])
 	targetURL := firstLine[1]
-
 	var bodyReader io.Reader
 	if len(parts) > 1 {
 		bodyReader = strings.NewReader(parts[1])
 	}
-
 	req, _ := http.NewRequestWithContext(ctx, method, targetURL, bodyReader)
 	for _, line := range headerLines[1:] {
 		h := strings.SplitN(line, ":", 2)
@@ -229,20 +222,17 @@ func (a *App) executeRawRequest(ctx context.Context, rawStr string, currentPaylo
 			req.Header.Set(strings.TrimSpace(h[0]), strings.TrimSpace(h[1]))
 		}
 	}
-
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
-
 	body, _ := io.ReadAll(resp.Body)
-
 	runtime.EventsEmit(a.ctx, "found_result", map[string]interface{}{
+		"Source":     "intruder",
 		"StatusCode": resp.StatusCode,
 		"URL":        currentPayload,
 		"ContentLen": len(body),
-		"Method":     method,
 	})
 }

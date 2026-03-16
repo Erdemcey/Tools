@@ -10,10 +10,13 @@ import (
 	"time"
 )
 
+// Result yapısına Method ve Body alanları eklendi
 type Result struct {
-	URL        string
 	StatusCode int
-	ContentLen int64
+	URL        string
+	ContentLen int
+	Method     string
+	Body       string
 }
 
 type Engine struct {
@@ -28,7 +31,7 @@ func NewEngine(baseURL string, threads int, path string) *Engine {
 		BaseURL:      baseURL,
 		Threads:      threads,
 		WordlistPath: path,
-		Results:      make(chan Result, 1000), // Buffer'ı yüksek tutmak tıkanmayı önler
+		Results:      make(chan Result, 1000),
 	}
 }
 
@@ -45,19 +48,20 @@ func (e *Engine) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	reqClient := NewRequester(10*time.Second, e.Threads)
 
-	// Worker Pool başlatılıyor
+	// Worker Pool
 	for i := 0; i < e.Threads; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for word := range words {
 				select {
-				case <-ctx.Done(): // Stop'a basıldıysa hemen çık
+				case <-ctx.Done():
 					return
 				default:
 					targetURL := fmt.Sprintf("%s/%s", strings.TrimRight(e.BaseURL, "/"), word)
 
-					status, size, err := reqClient.DoRequest(targetURL)
+					// DoRequest artık status, size, body ve error döndürmeli
+					status, size, body, err := reqClient.DoRequest(targetURL)
 
 					if err == nil && status != 404 {
 						select {
@@ -65,6 +69,8 @@ func (e *Engine) Run(ctx context.Context) {
 							URL:        targetURL,
 							StatusCode: status,
 							ContentLen: size,
+							Method:     "GET", // DoRequest içindeki method neyse o yazılmalı
+							Body:       body,  // Gelen yanıt gövdesi eklendi
 						}:
 						case <-ctx.Done():
 							return
@@ -75,7 +81,6 @@ func (e *Engine) Run(ctx context.Context) {
 		}()
 	}
 
-	// Dosyayı oku ve kanala gönder
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 1024), 1024*1024)
 	for scanner.Scan() {
@@ -87,6 +92,6 @@ func (e *Engine) Run(ctx context.Context) {
 	}
 
 StopProcessing:
-	close(words) // Worker'lara iş bitti sinyali gönder
-	wg.Wait()    // Tüm worker'ların güvenli kapandığından emin ol
+	close(words)
+	wg.Wait()
 }
