@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -14,26 +15,41 @@ func NewRequester(timeout time.Duration, threads int) *Requester {
 	return &Requester{
 		client: &http.Client{
 			Timeout: timeout,
-			// Redirect'leri takip etmemesi için (isteğe bağlı)
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+			// Burp Suite gibi davran: Yönlendirmeleri otomatik takip etme,
+			// her adımın RAW cevabını görmemizi sağla.
+			CheckRedirect: nil,
 		},
 	}
 }
 
-// 4 değer döndürecek şekilde güncellendi: (status, size, body, error)
 func (r *Requester) DoRequest(url string) (int, int, string, error) {
-	resp, err := r.client.Get(url)
+	req, _ := http.NewRequest("GET", url, nil)
+
+	// Tarayıcı gibi görünmek için User-Agent eklemek çok kritiktir
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	resp, err := r.client.Do(req)
 	if err != nil {
 		return 0, 0, "", err
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp.StatusCode, 0, "", err
+	bodyBytes, _ := io.ReadAll(resp.Body)
+
+	// --- TAM RAW RESPONSE OLUŞTURMA ---
+	// Status Line: HTTP/1.1 200 OK
+	raw := fmt.Sprintf("%s %s\r\n", resp.Proto, resp.Status)
+
+	// Headers
+	for name, values := range resp.Header {
+		for _, value := range values {
+			raw += fmt.Sprintf("%s: %s\r\n", name, value)
+		}
 	}
 
-	return resp.StatusCode, len(bodyBytes), string(bodyBytes), nil
+	// Body ile birleştir
+	raw += "\r\n" + string(bodyBytes)
+
+	return resp.StatusCode, len(bodyBytes), raw, nil
 }
