@@ -61,6 +61,7 @@ func (a *App) StartScan(targetURL string, threads int, wordlistPath string) {
 					"ContentLen": res.ContentLen,
 					"Method":     res.Method,
 					"Body":       res.Body,
+					"Raw":        res.Raw,
 					"RawRequest": fmt.Sprintf("%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Harbinger/1.0\r\nAccept: */*\r\n\r\n", res.Method, res.URL, targetURL),
 				})
 			case <-ctx.Done():

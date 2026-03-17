@@ -10,13 +10,14 @@ import (
 	"time"
 )
 
-// Result yapısına Method ve Body alanları eklendi
+// 🔥 DOĞRU YER: Body ve Raw burada
 type Result struct {
 	StatusCode int
 	URL        string
 	ContentLen int
 	Method     string
 	Body       string
+	Raw        string
 }
 
 type Engine struct {
@@ -46,22 +47,27 @@ func (e *Engine) Run(ctx context.Context) {
 
 	words := make(chan string, e.Threads*10)
 	var wg sync.WaitGroup
+
 	reqClient := NewRequester(10*time.Second, e.Threads)
 
-	// Worker Pool
+	// --- WORKERS ---
 	for i := 0; i < e.Threads; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+
 			for word := range words {
 				select {
 				case <-ctx.Done():
 					return
 				default:
-					targetURL := fmt.Sprintf("%s/%s", strings.TrimRight(e.BaseURL, "/"), word)
+					targetURL := fmt.Sprintf("%s/%s",
+						strings.TrimRight(e.BaseURL, "/"),
+						word,
+					)
 
-					// DoRequest artık status, size, body ve error döndürmeli
-					status, size, body, err := reqClient.DoRequest(targetURL)
+					// 🔥 DOĞRU: 5 değer al
+					status, size, body, raw, err := reqClient.DoRequest(targetURL)
 
 					if err == nil && status != 404 {
 						select {
@@ -69,8 +75,9 @@ func (e *Engine) Run(ctx context.Context) {
 							URL:        targetURL,
 							StatusCode: status,
 							ContentLen: size,
-							Method:     "GET", // DoRequest içindeki method neyse o yazılmalı
-							Body:       body,  // Gelen yanıt gövdesi eklendi
+							Method:     "GET",
+							Body:       body, // sadece HTML
+							Raw:        raw,  // full HTTP
 						}:
 						case <-ctx.Done():
 							return
@@ -81,17 +88,19 @@ func (e *Engine) Run(ctx context.Context) {
 		}()
 	}
 
+	// --- WORDLIST OKUMA ---
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 1024), 1024*1024)
+
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			goto StopProcessing
+			goto STOP
 		case words <- scanner.Text():
 		}
 	}
 
-StopProcessing:
+STOP:
 	close(words)
 	wg.Wait()
 }
