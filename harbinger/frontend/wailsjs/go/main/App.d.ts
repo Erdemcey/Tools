@@ -3,12 +3,6 @@
 
 export function SelectWordlist():Promise<string>;
 
-export function SendRepeater(arg1:string):Promise<string>;
-
-export function StartIntruder(arg1:string,arg2:string,arg3:string,arg4:string,arg5:number):Promise<void>;
-
 export function StartScan(arg1:string,arg2:number,arg3:string):Promise<void>;
-
-export function StopIntruder():Promise<void>;
 
 export function StopScan():Promise<void>;

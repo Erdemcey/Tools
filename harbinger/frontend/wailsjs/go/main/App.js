@@ -6,20 +6,8 @@ export function SelectWordlist() {
   return window['go']['main']['App']['SelectWordlist']();
 }
 
-export function SendRepeater(arg1) {
-  return window['go']['main']['App']['SendRepeater'](arg1);
-}
-
-export function StartIntruder(arg1, arg2, arg3, arg4, arg5) {
-  return window['go']['main']['App']['StartIntruder'](arg1, arg2, arg3, arg4, arg5);
-}
-
 export function StartScan(arg1, arg2, arg3) {
   return window['go']['main']['App']['StartScan'](arg1, arg2, arg3);
-}
-
-export function StopIntruder() {
-  return window['go']['main']['App']['StopIntruder']();
 }
 
 export function StopScan() {
